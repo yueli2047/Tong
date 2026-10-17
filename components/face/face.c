@@ -1,10 +1,11 @@
 /*
  * Face component: LVGL glue and public API.
  *
- * LVGL only moves pixels here. The face is rasterized by face_raster.c
- * straight into a full-screen RGB565 canvas buffer in PSRAM; afterwards only
- * the changed rectangle is handed to LVGL, which copies it into its own
- * DMA buffers and flushes it over SPI.
+ * Every FRAME_MS an LVGL timer (so it runs in the LVGL task, holding the
+ * LVGL lock) advances the playback, drives the servos, renders what changed
+ * straight into a full-screen RGB565 canvas buffer in PSRAM, and hands only
+ * those areas to LVGL, which copies them into its DMA buffers and flushes
+ * them over SPI. The face is the only caller of the servo component.
  */
 #include <string.h>
 #include "face.h"
@@ -13,71 +14,136 @@
 #include "display.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 
 static const char *TAG = "face";
 
-#define BG_RGB  0x000000
+#define BG_RGB          0x000000
+#define FRAME_MS        33          /* ~30 fps */
+#define DEFAULT_STATE   "idle"
+#define FOLLOW_AT_BOOT  true        /* servos follow the head from power-on */
+
+/* Periodic timing summary in the log; set to 0 once the numbers are known. */
+#define FACE_STATS          1
+#define FACE_STATS_EVERY_MS 5000
 
 static struct {
     lv_obj_t *canvas;
+    lv_timer_t *timer;
     uint16_t *fb;
     int stride;                 /* pixels per framebuffer row */
-    face_rect_t drawn;          /* screen area covered by the last frame */
-    int expr;
-    int64_t refr_t0;            /* timing of the LVGL refresh after a render */
-    bool refr_measure;
-} s = { .expr = -1 };
+} s;
 
-/* Static: ~3 KB, kept off the LVGL task's stack */
-static face_shapes_t s_shapes;
+#if FACE_STATS
+static struct {
+    int64_t since;
+    int frames, renders;
+    int64_t render_sum;
+    int render_max;
+    int64_t pixels;
+    bool refr_pending, refr_running;
+    int64_t refr_t0, refr_sum;
+    int refr_n, refr_max;
+} st;
 
-/* Runs in the LVGL task. REFR_READY comes after the last chunk was handed to
- * the flush callback; that chunk's DMA (~3 ms) may still be on the wire. */
+/* REFR_READY comes after the last chunk was handed to the flush callback;
+ * that chunk's DMA (up to ~5 ms) may still be on the wire. */
 static void refr_event_cb(lv_event_t *e)
 {
+    const int64_t now = esp_timer_get_time();
     if (lv_event_get_code(e) == LV_EVENT_REFR_START) {
-        s.refr_t0 = esp_timer_get_time();
-    } else if (s.refr_measure) {
-        s.refr_measure = false;
-        ESP_LOGI(TAG, "lvgl refresh %d us", (int)(esp_timer_get_time() - s.refr_t0));
+        st.refr_running = st.refr_pending;
+        st.refr_pending = false;
+        st.refr_t0 = now;
+    } else if (st.refr_running) {
+        st.refr_running = false;
+        const int us = (int)(now - st.refr_t0);
+        st.refr_sum += us;
+        st.refr_n++;
+        if (us > st.refr_max) st.refr_max = us;
     }
+}
+
+static void stats_report(int64_t now)
+{
+    if (now - st.since < FACE_STATS_EVERY_MS * 1000LL) {
+        return;
+    }
+    const int secs = (int)((now - st.since) / 1000000);
+    ESP_LOGI(TAG, "%ds: %d frames, %d drawn | draw avg %d us max %d us, avg %d px | lvgl refresh avg %d us max %d us",
+             secs, st.frames, st.renders,
+             st.renders ? (int)(st.render_sum / st.renders) : 0, st.render_max,
+             st.renders ? (int)(st.pixels / st.renders) : 0,
+             st.refr_n ? (int)(st.refr_sum / st.refr_n) : 0, st.refr_max);
+    const bool pending = st.refr_pending, running = st.refr_running;
+    const int64_t t0 = st.refr_t0;
+    memset(&st, 0, sizeof(st));
+    st.since = now;
+    st.refr_pending = pending;
+    st.refr_running = running;
+    st.refr_t0 = t0;
+}
+#endif
+
+static float esp_rand01(void)
+{
+    return (float)(esp_random() >> 8) * (1.0f / 16777216.0f);
 }
 
 /* Caller holds the display lock. */
-static void render(const face_pose_t *pose, uint32_t body_rgb, uint32_t eyes_rgb)
+static void draw_frame(void)
 {
     const int64_t t0 = esp_timer_get_time();
+    const int64_t now_ms = t0 / 1000;
+    face_frame_t fr;
+    face_anim_update(now_ms, &fr);
+    face_follow_apply(&fr, now_ms);
+    face_dirty_t d;
+    face_render(s.fb, s.stride, &fr, face_rgb565(BG_RGB), &d);
 
-    face_geom_build(pose, &FACE_BODY, &s_shapes);
-    const face_rect_t now = face_rect_clip_screen(face_shapes_bounds(&s_shapes));
-    /* redraw what the old frame covered as well, so nothing is left behind */
-    const face_rect_t dirty = face_rect_clip_screen(face_rect_union(s.drawn, now));
-
-    const int64_t t1 = esp_timer_get_time();
-
-    face_raster_shapes(s.fb, s.stride, dirty, &s_shapes,
-                       face_rgb565(BG_RGB), face_rgb565(body_rgb), face_rgb565(eyes_rgb));
-    s.drawn = now;
-
-    const int64_t t2 = esp_timer_get_time();
-
-    if (!face_rect_empty(dirty)) {
-        const lv_area_t area = { dirty.x0, dirty.y0, dirty.x1 - 1, dirty.y1 - 1 };  /* inclusive */
+    for (int i = 0; i < d.n; i++) {
+        const lv_area_t area = { d.r[i].x0, d.r[i].y0, d.r[i].x1 - 1, d.r[i].y1 - 1 };  /* inclusive */
         lv_obj_invalidate_area(s.canvas, &area);
-        s.refr_measure = true;
     }
-    ESP_LOGI(TAG, "render: geometry %d us + raster %d us, dirty %dx%d",
-             (int)(t1 - t0), (int)(t2 - t1), dirty.x1 - dirty.x0, dirty.y1 - dirty.y0);
+
+#if FACE_STATS
+    const int64_t t1 = esp_timer_get_time();
+    if (st.since == 0) {
+        st.since = t0;
+    }
+    st.frames++;
+    if (d.n > 0) {
+        const int us = (int)(t1 - t0);
+        st.renders++;
+        st.render_sum += us;
+        if (us > st.render_max) st.render_max = us;
+        for (int i = 0; i < d.n; i++) {
+            st.pixels += (int64_t)(d.r[i].x1 - d.r[i].x0) * (d.r[i].y1 - d.r[i].y0);
+        }
+        st.refr_pending = true;
+    }
+    stats_report(t1);
+#endif
 }
 
-static void show_locked(int index)
+static void frame_cb(lv_timer_t *t)
 {
-    const face_expr_def_t *e = &FACE_EXPRS[index];
-    face_pose_t pose;
-    face_pose_from_expr(e, &pose);
-    render(&pose, e->body_rgb, e->eyes_rgb);
-    s.expr = index;
+    (void)t;
+    draw_frame();
+}
+
+static int find_state(const char *name)
+{
+    if (name == NULL) {
+        return -1;
+    }
+    for (int i = 0; i < FACE_ANIM_COUNT; i++) {
+        if (strcmp(FACE_ANIMS[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 esp_err_t face_init(void)
@@ -105,8 +171,6 @@ esp_err_t face_init(void)
         return ESP_ERR_NO_MEM;
     }
     s.stride = (int)(stride_bytes / sizeof(uint16_t));
-    const face_rect_t screen = { 0, 0, FACE_SCREEN_W, FACE_SCREEN_H };
-    face_raster_fill(s.fb, s.stride, screen, face_rgb565(BG_RGB));
 
     if (!display_lock(0)) {
         heap_caps_free(s.fb);
@@ -124,31 +188,47 @@ esp_err_t face_init(void)
     lv_canvas_set_buffer(s.canvas, s.fb, FACE_SCREEN_W, FACE_SCREEN_H, LV_COLOR_FORMAT_RGB565);
     lv_obj_set_pos(s.canvas, 0, 0);
 
+#if FACE_STATS
     lv_display_add_event_cb(disp, refr_event_cb, LV_EVENT_REFR_START, NULL);
     lv_display_add_event_cb(disp, refr_event_cb, LV_EVENT_REFR_READY, NULL);
+#endif
 
-    s.drawn = screen;           /* first frame repaints everything */
-    show_locked(FACE_EXPR_NEUTRAL);
+    int start = find_state(DEFAULT_STATE);
+    if (start < 0) {
+        start = 0;
+    }
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    face_anim_init(start, now_ms, esp_rand01);
+    face_follow_init(FOLLOW_AT_BOOT, now_ms);
+    face_render_reset();        /* first frame paints the whole screen */
+    draw_frame();
+    s.timer = lv_timer_create(frame_cb, FRAME_MS, NULL);
 
     display_unlock();
-    ESP_LOGI(TAG, "init ok: avatar \"%s\", %d expressions, %d states",
-             FACE_AVATAR_NAME, FACE_EXPR_COUNT, FACE_ANIM_COUNT);
+    ESP_LOGI(TAG, "init ok: avatar \"%s\", %d expressions, %d states, starting \"%s\", servo follow %s",
+             FACE_AVATAR_NAME, FACE_EXPR_COUNT, FACE_ANIM_COUNT, FACE_ANIMS[start].name,
+             FOLLOW_AT_BOOT ? "on" : "off");
     return ESP_OK;
 }
 
-int face_expression_count(void)
+int face_state_count(void)
 {
-    return FACE_EXPR_COUNT;
+    return FACE_ANIM_COUNT;
 }
 
-const char *face_expression_name(int index)
+const char *face_state_name(int index)
 {
-    return (index >= 0 && index < FACE_EXPR_COUNT) ? FACE_EXPR_NAMES[index] : NULL;
+    return (index >= 0 && index < FACE_ANIM_COUNT) ? FACE_ANIMS[index].name : NULL;
 }
 
-esp_err_t face_show_expression(int index)
+int face_get_state(void)
 {
-    if (index < 0 || index >= FACE_EXPR_COUNT) {
+    return s.canvas != NULL ? face_anim_current() : -1;
+}
+
+esp_err_t face_set_state(int index)
+{
+    if (index < 0 || index >= FACE_ANIM_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s.canvas == NULL) {
@@ -157,7 +237,32 @@ esp_err_t face_show_expression(int index)
     if (!display_lock(0)) {
         return ESP_ERR_TIMEOUT;
     }
-    show_locked(index);
+    face_anim_play(index, esp_timer_get_time() / 1000);
     display_unlock();
     return ESP_OK;
+}
+
+esp_err_t face_set_state_by_name(const char *name)
+{
+    const int index = find_state(name);
+    return index < 0 ? ESP_ERR_NOT_FOUND : face_set_state(index);
+}
+
+esp_err_t face_set_servo_follow(bool on)
+{
+    if (s.canvas == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!display_lock(0)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    face_follow_set(on, esp_timer_get_time() / 1000);
+    display_unlock();
+    ESP_LOGI(TAG, "servo follow %s", on ? "on" : "off");
+    return ESP_OK;
+}
+
+bool face_get_servo_follow(void)
+{
+    return s.canvas != NULL && face_follow_enabled();
 }

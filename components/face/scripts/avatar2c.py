@@ -67,11 +67,12 @@ def ms(value, where):
 
 
 def cf(x):
-    s = f"{x:.4f}".rstrip("0")
-    if s.endswith("."):
-        s += "0"
-    if s in ("-0.0",):
-        s = "0.0"
+    # 9 significant digits: the C float is exactly the float nearest to the JSON value
+    s = f"{x:.9g}"
+    if s == "-0":
+        s = "0"
+    if "e" not in s and "." not in s:
+        s += ".0"
     return s + "f"
 
 

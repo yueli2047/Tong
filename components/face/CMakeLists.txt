@@ -1,7 +1,8 @@
-idf_component_register(SRCS "face.c" "face_geom.c" "face_raster.c"
+idf_component_register(SRCS "face.c" "face_anim.c" "face_follow.c" "face_render.c"
+                            "face_geom.c" "face_raster.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "."
-                       PRIV_REQUIRES display esp_timer)
+                       PRIV_REQUIRES display servo esp_timer esp_hw_support)
 
 # The face is rendered every frame: build it optimized even when the project
 # uses the default debug level (-Og). Only this component is affected.
@@ -16,6 +17,13 @@ set(avatar_json "${COMPONENT_DIR}/anchor.avatar.json")
 set(avatar2c    "${COMPONENT_DIR}/scripts/avatar2c.py")
 set(gen_c       "${CMAKE_CURRENT_BINARY_DIR}/face_data.c")
 set(gen_h       "${CMAKE_CURRENT_BINARY_DIR}/face_data.h")
+
+if(NOT EXISTS "${avatar_json}")
+    message(FATAL_ERROR
+        "face: ${avatar_json} is missing.\n"
+        "Export it from the avatar lab (Export > Download .avatar.json definition) "
+        "and save it there under that name.")
+endif()
 
 add_custom_command(
     OUTPUT ${gen_c} ${gen_h}

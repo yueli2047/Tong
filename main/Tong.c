@@ -62,16 +62,16 @@ void app_main(void)
 
     status_led_set(STATUS_LED_OK);
 
-    oled_show_text("neutral");
-    ESP_LOGI(TAG, "boot complete: YES = next expression, NO = previous");
+    int st = face_get_state();
+    oled_show_text(face_state_name(st));
+    ESP_LOGI(TAG, "boot complete: YES = next state, NO = previous");
 
-    int expr = 0;
-    const int count = face_expression_count();
     while (1) {
         button_t b = buttons_wait(portMAX_DELAY);
-        expr = (b == BUTTON_YES) ? (expr + 1) % count : (expr + count - 1) % count;
-        face_show_expression(expr);
-        oled_show_text(face_expression_name(expr));
-        ESP_LOGI(TAG, "expression %d: %s", expr, face_expression_name(expr));
+        const int n = face_state_count();
+        st = (b == BUTTON_YES) ? (st + 1) % n : (st + n - 1) % n;
+        face_set_state(st);
+        oled_show_text(face_state_name(st));
+        ESP_LOGI(TAG, "state %d: %s", st, face_state_name(st));
     }
 }

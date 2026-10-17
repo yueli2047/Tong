@@ -169,6 +169,52 @@ void face_raster_fill(uint16_t *fb, int stride, face_rect_t clip, uint16_t color
 void face_raster_shapes(uint16_t *fb, int stride, face_rect_t clip, const face_shapes_t *s,
                         uint16_t bg, uint16_t body, uint16_t eyes);
 
+/* ---------- playback (face_anim.c) ---------- */
+
+typedef struct {
+    face_pose_t pose;           /* full pose, ambient motion included */
+    float base_head[3];         /* head angles without ambient motion: what the servos follow */
+    float rot[9];               /* head rotation drawn on screen (row-major) */
+    uint32_t body_rgb, eyes_rgb;
+} face_frame_t;
+
+/* Start state `anim` at now_ms, already showing its first expression.
+ * rand01 returns [0, 1) for blink intervals; NULL uses a built-in generator. */
+void face_anim_init(int anim, int64_t now_ms, float (*rand01)(void));
+/* Switch state; the face eases over from where it is. */
+void face_anim_play(int anim, int64_t now_ms);
+int  face_anim_current(void);
+/* Advance to now_ms (non-decreasing) and produce that frame.
+ * out->rot is the full head rotation; servo following replaces it. */
+void face_anim_update(int64_t now_ms, face_frame_t *out);
+
+/* ---------- servo following (face_follow.c) ---------- */
+
+/* Read the servo limits; following starts faded out and fades toward `on`. */
+void face_follow_init(bool on, int64_t now_ms);
+/* Fade following in or out over FOLLOW_FADE_MS. */
+void face_follow_set(bool on, int64_t now_ms);
+bool face_follow_enabled(void);
+/* Gimbal angles (ROS REP-103, degrees: +yaw = device turns to its own left,
+ * +pitch = nods down) that point the face along rotation m. */
+void face_follow_gimbal_angles(const float m[9], float *yaw, float *pitch);
+/* Command the servos for this frame and set fr->rot to the part of the head
+ * rotation the gimbal has not taken over (what the screen should draw). */
+void face_follow_apply(face_frame_t *fr, int64_t now_ms);
+
+/* ---------- frame renderer (face_render.c) ---------- */
+
+typedef struct {
+    face_rect_t r[2];
+    int n;
+} face_dirty_t;
+
+/* The next face_render() repaints the whole screen. */
+void face_render_reset(void);
+/* Draw `fr` into the framebuffer, touching only what changed since the last
+ * call; `out` lists the areas written (0 to 2). */
+void face_render(uint16_t *fb, int stride, const face_frame_t *fr, uint16_t bg, face_dirty_t *out);
+
 #ifdef __cplusplus
 }
 #endif
