@@ -1,41 +1,19 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_lvgl_port.h"
 
 #include "board_pins.h"
 #include "status_led.h"
 #include "buttons.h"
 #include "display.h"
+#include "face.h"
+#include "oled.h"
+#include "servo.h"
 
 static const char *TAG = "tong";
-
-static lv_obj_t *make_eye(lv_obj_t *parent, int cx, int cy, int r)
-{
-    lv_obj_t *eye = lv_obj_create(parent);
-    lv_obj_remove_style_all(eye);
-    lv_obj_set_size(eye, r * 2, r * 2);
-    lv_obj_set_pos(eye, cx - r, cy - r);
-    lv_obj_set_style_radius(eye, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(eye, lv_color_hex(0x00A0FF), 0);
-    lv_obj_set_style_bg_opa(eye, LV_OPA_COVER, 0);
-    return eye;
-}
-
-static void draw_test_screen(void)
-{
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-    make_eye(scr, 90, 93, 20);    // Stack-chan layout, bigger radius
-    make_eye(scr, 230, 96, 20);
-
-    lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "Tong");
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 4, 4);
-}
-
+#define SERVO_STREAM_TEST 0      // set to 0 after the test
+void servo_stream_test(void);
 void app_main(void)
 {
     ESP_ERROR_CHECK(status_led_init(PIN_STATUS_LED));
@@ -46,6 +24,19 @@ void app_main(void)
         return;
     }
 
+    if (servo_init(PIN_SERVO_PAN, PIN_SERVO_TILT) != ESP_OK) {
+        status_led_set(STATUS_LED_ERROR);
+        return;
+    }
+
+    // LVGL runs once for the whole program; both displays attach to it.
+    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    if (lvgl_port_init(&lvgl_cfg) != ESP_OK) {
+        status_led_set(STATUS_LED_ERROR);
+        return;
+    }
+
+    // ST7789 first: the first display added becomes LVGL's default, which face draws on.
     const display_pins_t disp_pins = {
         .sclk = PIN_TFT_SCLK,
         .mosi = PIN_TFT_MOSI,
@@ -59,16 +50,28 @@ void app_main(void)
         return;
     }
 
-    if (display_lock(0)) {
-        draw_test_screen();
-        display_unlock();
+    if (oled_init(PIN_OLED_SDA, PIN_OLED_SCL) != ESP_OK) {
+        status_led_set(STATUS_LED_ERROR);
+        return;
+    }
+
+    if (face_init() != ESP_OK) {
+        status_led_set(STATUS_LED_ERROR);
+        return;
     }
 
     status_led_set(STATUS_LED_OK);
-    ESP_LOGI(TAG, "boot complete, press a button");
 
+    oled_show_text("neutral");
+    ESP_LOGI(TAG, "boot complete: YES = next expression, NO = previous");
+
+    int expr = 0;
+    const int count = face_expression_count();
     while (1) {
         button_t b = buttons_wait(portMAX_DELAY);
-        ESP_LOGI(TAG, "%s", (b == BUTTON_YES) ? "YES" : "NO");
+        expr = (b == BUTTON_YES) ? (expr + 1) % count : (expr + count - 1) % count;
+        face_show_expression(expr);
+        oled_show_text(face_expression_name(expr));
+        ESP_LOGI(TAG, "expression %d: %s", expr, face_expression_name(expr));
     }
 }

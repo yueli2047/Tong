@@ -8,7 +8,7 @@
 #include "esp_log.h"
 
 #define LCD_HOST            SPI2_HOST
-#define LCD_PIXEL_CLOCK_HZ  (20 * 1000 * 1000)
+#define LCD_PIXEL_CLOCK_HZ  (40 * 1000 * 1000)
 #define LCD_H_RES           320   // landscape, after rotation
 #define LCD_V_RES           240
 #define LCD_BUF_LINES       40    // partial render buffer height
@@ -73,9 +73,6 @@ esp_err_t display_init(const display_pins_t *pins)
     CHECK(esp_lcd_panel_init(panel));
     CHECK(esp_lcd_panel_invert_color(panel, true));
     CHECK(esp_lcd_panel_disp_on_off(panel, true));
-
-    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    CHECK(lvgl_port_init(&lvgl_cfg));
 
     // Hardware rotation: equivalent of LV_DISPLAY_ROTATION_270 in the example
     const lvgl_port_display_cfg_t disp_cfg = {
