@@ -150,10 +150,13 @@ def parse(path):
             })
         if not steps or len(steps) > 255:
             fail(f"{w}: needs 1..255 steps")
+        playback = lookup(PLAYBACK, a.get("playbackMode", "loop"), f"{w}.playbackMode")
+        if playback != PLAYBACK["once"] and sum(s["transition_ms"] + s["hold_ms"] for s in steps) == 0:
+            fail(f"{w}: a repeating state needs some time per cycle (every step is 0 ms)")
         b = a.get("blink", {"enabled": False})
         anims.append({
             "key": key,
-            "playback": lookup(PLAYBACK, a.get("playbackMode", "loop"), f"{w}.playbackMode"),
+            "playback": playback,
             "steps": steps,
             "blink": (
                 bool(b.get("enabled", False)),

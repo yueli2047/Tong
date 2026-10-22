@@ -42,8 +42,8 @@
       },
       "perspective": 1,
       "motion": {
-        "eyes": "none",
-        "body": "none"
+        "eyes": "microSaccades",
+        "body": "slowDrift"
       }
     },
     "upward-side-glance": {

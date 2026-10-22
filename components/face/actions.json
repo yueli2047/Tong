@@ -1,0 +1,161 @@
+{
+  "schema": "tong/face-actions",
+  "version": 1,
+  "about": [
+    "One-shot head motions played on top of whatever the face is doing.",
+    "Each key is an offset from where the face is pointing, in ROS REP-103 degrees:",
+    "  yaw   + turns to the device's own left (the viewer's right)",
+    "  pitch + nods down (the tilt servo stops at about +18 down from level)",
+    "  roll  + top of the head toward the device's own right; drawn on the screen only",
+    "Missing axes are 0. 't' is ms from the start; the first key is t=0 at 0 and the last key is back at 0.",
+    "'ease' (smooth | snappy | spring) shapes the segment that ends at that key; default smooth.",
+    "'expression' optionally borrows an expression's eyes during the action: eased in over in_ms,",
+    "given back at until_ms over out_ms. The head motion always comes from the keys.",
+    "The servos follow what they can; whatever they cannot (speed, limits) the screen draws.",
+    "Edit, then idf.py build: scripts/actions2c.py checks everything and warns about fast motion."
+  ],
+  "actions": [
+    {
+      "name": "nod",
+      "description": "Nods twice: yes, agreed, understood.",
+      "keys": [
+        { "t": 0 },
+        { "t": 260, "pitch": 12 },
+        { "t": 500, "pitch": -2 },
+        { "t": 760, "pitch": 10 },
+        { "t": 1020 }
+      ]
+    },
+    {
+      "name": "shake",
+      "description": "Shakes the head: no, disagree, not that.",
+      "keys": [
+        { "t": 0 },
+        { "t": 200, "yaw": 14 },
+        { "t": 480, "yaw": -14 },
+        { "t": 760, "yaw": 12 },
+        { "t": 1020, "yaw": -8 },
+        { "t": 1240 }
+      ]
+    },
+    {
+      "name": "look_around",
+      "description": "Looks to one side, then the other, as if checking the surroundings.",
+      "keys": [
+        { "t": 0 },
+        { "t": 700, "yaw": 24, "pitch": -4 },
+        { "t": 1500, "yaw": 24, "pitch": -4 },
+        { "t": 2400, "yaw": -24, "pitch": -2 },
+        { "t": 3200, "yaw": -24, "pitch": -2 },
+        { "t": 3800 }
+      ]
+    },
+    {
+      "name": "doze",
+      "description": "Nods off: the head slowly droops with drowsy eyes, then jerks awake.",
+      "expression": { "name": "drowsy-closed", "in_ms": 900, "until_ms": 2350, "out_ms": 150 },
+      "keys": [
+        { "t": 0 },
+        { "t": 1700, "pitch": 12, "roll": -5 },
+        { "t": 2300, "pitch": 15, "roll": -6 },
+        { "t": 2500, "pitch": -4, "ease": "snappy" },
+        { "t": 3000 }
+      ]
+    },
+    {
+      "name": "tilt",
+      "description": "Tilts the head to one side, curious or puzzled.",
+      "keys": [
+        { "t": 0 },
+        { "t": 400, "roll": 14 },
+        { "t": 1500, "roll": 14 },
+        { "t": 1900 }
+      ]
+    },
+    {
+      "name": "bow",
+      "description": "Bows politely: a slow, deep nod with the eyes closed.",
+      "expression": { "name": "eyes-closed", "in_ms": 500, "until_ms": 1700, "out_ms": 400 },
+      "keys": [
+        { "t": 0 },
+        { "t": 700, "pitch": 16 },
+        { "t": 1500, "pitch": 16 },
+        { "t": 2200 }
+      ]
+    },
+    {
+      "name": "startle",
+      "description": "Startles: jerks back with wide-open eyes, then settles.",
+      "expression": { "name": "joyful-wide", "in_ms": 80, "until_ms": 800, "out_ms": 400 },
+      "keys": [
+        { "t": 0 },
+        { "t": 130, "pitch": -12, "ease": "snappy" },
+        { "t": 450, "pitch": -10 },
+        { "t": 1000 }
+      ]
+    },
+    {
+      "name": "perk_up",
+      "description": "Perks up: lifts the head alertly, as if something caught its attention.",
+      "expression": { "name": "attentive-left", "in_ms": 250, "until_ms": 1700, "out_ms": 400 },
+      "keys": [
+        { "t": 0 },
+        { "t": 380, "pitch": -10, "ease": "spring" },
+        { "t": 1600, "pitch": -10 },
+        { "t": 2100 }
+      ]
+    },
+    {
+      "name": "bounce",
+      "description": "Bounces with excitement: quick little hops, for joy or celebration.",
+      "keys": [
+        { "t": 0 },
+        { "t": 160, "pitch": -7, "roll": 4 },
+        { "t": 320, "pitch": 2 },
+        { "t": 480, "pitch": -7, "roll": -4 },
+        { "t": 640, "pitch": 2 },
+        { "t": 800, "pitch": -5, "roll": 3 },
+        { "t": 1000 }
+      ]
+    },
+    {
+      "name": "turn_away",
+      "description": "Turns away shyly with a downcast look, then slowly comes back.",
+      "expression": { "name": "shy-downward", "in_ms": 400, "until_ms": 2000, "out_ms": 500 },
+      "keys": [
+        { "t": 0 },
+        { "t": 500, "yaw": -20, "pitch": 8, "roll": -6 },
+        { "t": 1700, "yaw": -22, "pitch": 9, "roll": -6 },
+        { "t": 2500 }
+      ]
+    },
+    {
+      "name": "jiggle",
+      "description": "Jiggles side to side in two short bursts to get attention, like a notification.",
+      "keys": [
+        { "t": 0 },
+        { "t": 100, "yaw": 6 },
+        { "t": 220, "yaw": -6 },
+        { "t": 340, "yaw": 6 },
+        { "t": 460 },
+        { "t": 760 },
+        { "t": 860, "yaw": 6 },
+        { "t": 980, "yaw": -6 },
+        { "t": 1100, "yaw": 6 },
+        { "t": 1220 }
+      ]
+    },
+    {
+      "name": "sigh",
+      "description": "Sighs: a small lift, then the head sinks slowly with tired eyes and comes back.",
+      "expression": { "name": "sleepy-squint", "in_ms": 700, "until_ms": 2200, "out_ms": 600 },
+      "keys": [
+        { "t": 0 },
+        { "t": 300, "pitch": -3 },
+        { "t": 1500, "pitch": 12, "roll": 3 },
+        { "t": 2300, "pitch": 10, "roll": 3 },
+        { "t": 3100 }
+      ]
+    }
+  ]
+}

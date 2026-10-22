@@ -1,15 +1,20 @@
 /*
- * Playback layer: state (animation) -> one pose per frame.
+ * Playback layer: program -> one pose per frame.
  *
  * Follows the playback of Bible Strong Avatar Lab's exported runtime
  * (https://github.com/smontlouis/bible-strong-avatar-lab, AGPL-3.0):
- *   - a state is a list of steps; each step eases to an expression over
+ *   - a program is a list of steps; each step eases to an expression over
  *     transitionMs, then holds it for holdMs
  *   - loop / once / pingPong playback
- *   - blinks on the state's own schedule
+ *   - blinks on the program's own schedule
  *   - ambient motion (microSaccades / shake / slowDrift) per expression,
  *     faded in during transitions
- *   - switching state eases from wherever the face currently is
+ *   - switching program eases from wherever the face currently is
+ *
+ * A program is either one of the avatar's states (FACE_ANIMS) or a custom
+ * one built at run time: a single expression is a one-step 'once' program,
+ * a sequence is up to FACE_CUSTOM_MAX_STEPS steps. Custom programs blink
+ * like the "idle" state. Both play through exactly the same code.
  *
  * Timers are scheduled on exact due times rather than on the frame that
  * notices them, so the timeline does not drift with the frame rate. The
@@ -61,10 +66,24 @@ static void look_from_expr(const face_expr_def_t *e, look_t *l)
 
 /* ---------- state ---------- */
 
+/* Custom programs blink like this state (or, without it, the first state that
+ * blinks; or, without any, CUSTOM_BLINK_FALLBACK). */
+#define CUSTOM_BLINK_FROM       "idle"
+#define CUSTOM_BLINK_FALLBACK   ((face_blink_def_t){ true, 2600, 3400, 6200, 280 })
+
 static struct {
-    int anim, step, dir;
-    bool playing;               /* false once a 'once' state has finished */
+    const face_anim_def_t *def; /* what is playing: &FACE_ANIMS[anim] or &custom */
+    int anim;                   /* index into FACE_ANIMS, -1 for a custom program */
+    int step, dir;
+    uint8_t playback;           /* def->playback, or 'once' if a cycle would take no time */
+    bool playing;               /* false once a 'once' program has finished */
     int64_t step_due;
+
+    face_anim_def_t custom;
+    face_step_def_t custom_steps[FACE_CUSTOM_MAX_STEPS];
+
+    bool override;              /* an action has borrowed the expression: steps keep
+                                 * their timing but do not change the look */
 
     look_t cur;                 /* where the face is, as of the last update */
 
@@ -103,7 +122,7 @@ static float clamp01(float v)
     return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
 }
 
-static float ease(float p, uint8_t kind)
+float face_ease(float p, uint8_t kind)
 {
     switch (kind) {
     case FACE_TRANSITION_SNAPPY: {
@@ -190,10 +209,8 @@ static void apply_motion(const look_t *target, int64_t now)
     }
 }
 
-static void animate_to(int expr, int ms, uint8_t kind, int64_t now)
+static void animate_to_look(look_t target, int ms, uint8_t kind, int64_t now)
 {
-    look_t target;
-    look_from_expr(&FACE_EXPRS[expr], &target);
     apply_motion(&target, now);
     for (size_t i = 0; i < sizeof(s_angle_fields) / sizeof(s_angle_fields[0]); i++) {
         const int f = s_angle_fields[i];
@@ -214,22 +231,30 @@ static void animate_to(int expr, int ms, uint8_t kind, int64_t now)
     A.strength = 0.0f;
 }
 
+static void animate_to(int expr, int ms, uint8_t kind, int64_t now)
+{
+    look_t target;
+    look_from_expr(&FACE_EXPRS[expr], &target);
+    animate_to_look(target, ms, kind, now);
+}
+
 static void run_step(int64_t now)
 {
-    const face_step_def_t *st = &FACE_ANIMS[A.anim].steps[A.step];
-    animate_to(st->expr, st->transition_ms, st->transition, now);
+    const face_step_def_t *st = &A.def->steps[A.step];
+    if (!A.override) {
+        animate_to(st->expr, st->transition_ms, st->transition, now);
+    }
     A.step_due = now + st->transition_ms + st->hold_ms;
 }
 
 static void advance(int64_t now)
 {
-    const face_anim_def_t *an = &FACE_ANIMS[A.anim];
-    const int last = an->step_count - 1;
-    if (an->playback == FACE_PLAYBACK_ONCE && A.step >= last) {
+    const int last = A.def->step_count - 1;
+    if (A.playback == FACE_PLAYBACK_ONCE && A.step >= last) {
         A.playing = false;      /* stays on the last expression */
         return;
     }
-    if (an->playback == FACE_PLAYBACK_PING_PONG && last > 0) {
+    if (A.playback == FACE_PLAYBACK_PING_PONG && last > 0) {
         if (A.step >= last) {
             A.dir = -1;
         } else if (A.step <= 0) {
@@ -244,14 +269,14 @@ static void advance(int64_t now)
 
 static void schedule_blink(int delay_ms, int64_t now)
 {
-    const face_blink_def_t *b = &FACE_ANIMS[A.anim].blink;
+    const face_blink_def_t *b = &A.def->blink;
     A.blink_scheduled = b->enabled;
     A.blink_due = now + delay_ms;
 }
 
 static void fire_blink(void)
 {
-    const face_blink_def_t *b = &FACE_ANIMS[A.anim].blink;
+    const face_blink_def_t *b = &A.def->blink;
     const int64_t t = A.blink_due;
     A.blinking = true;
     A.blink_start = t;
@@ -280,36 +305,115 @@ static void process_timers(int64_t now)
 
 /* ---------- public (face_priv.h) ---------- */
 
+static face_blink_def_t custom_blink(void)
+{
+    for (int i = 0; i < FACE_ANIM_COUNT; i++) {
+        if (strcmp(FACE_ANIMS[i].name, CUSTOM_BLINK_FROM) == 0) {
+            return FACE_ANIMS[i].blink;
+        }
+    }
+    for (int i = 0; i < FACE_ANIM_COUNT; i++) {
+        if (FACE_ANIMS[i].blink.enabled) {
+            return FACE_ANIMS[i].blink;
+        }
+    }
+    return CUSTOM_BLINK_FALLBACK;
+}
+
+/* Start `def` from its first step. Whatever was due before the switch happens
+ * first (e.g. a blink already started, which then finishes on its own). */
+static void start(const face_anim_def_t *def, int anim, int64_t now_ms)
+{
+    A.override = false;         /* a new face replaces one an action borrowed */
+    A.def = def;
+    A.anim = anim;
+    A.step = 0;
+    A.dir = 1;
+    A.playing = true;
+    /* A repeating program whose steps all take 0 ms would never let time
+     * advance; play it once instead. (Callers reject these; this is the
+     * last line of defense against hanging the frame loop.) */
+    A.playback = def->playback;
+    if (A.playback != FACE_PLAYBACK_ONCE) {
+        int64_t cycle = 0;
+        for (int i = 0; i < def->step_count; i++) {
+            cycle += def->steps[i].transition_ms + def->steps[i].hold_ms;
+        }
+        if (cycle <= 0) {
+            A.playback = FACE_PLAYBACK_ONCE;
+        }
+    }
+    run_step(now_ms);
+    schedule_blink(def->blink.initial_delay_ms, now_ms);
+}
+
 void face_anim_init(int anim, int64_t now_ms, float (*rand01)(void))
 {
     memset(&A, 0, sizeof(A));
     A.rand01 = rand01 ? rand01 : default_rand01;
     A.openness = 1.0f;
     A.strength = 1.0f;
-    A.anim = anim;
+    A.custom.name = NULL;
+    A.custom.steps = A.custom_steps;
+    A.custom.blink = custom_blink();
     look_from_expr(&FACE_EXPRS[FACE_ANIMS[anim].steps[0].expr], &A.cur);
     A.eye_sig = A.cur.eye_motion;
     A.body_sig = A.cur.body_motion;
     A.eye_t0 = A.body_t0 = now_ms;
-    face_anim_play(anim, now_ms);
+    start(&FACE_ANIMS[anim], anim, now_ms);
 }
 
 void face_anim_play(int anim, int64_t now_ms)
 {
-    /* whatever was due before the switch happens first (e.g. a blink already started) */
     process_timers(now_ms);
-    A.anim = anim;
-    A.step = 0;
-    A.dir = 1;
-    A.playing = true;
-    run_step(now_ms);
-    schedule_blink(FACE_ANIMS[anim].blink.initial_delay_ms, now_ms);
-    /* a blink already under way finishes on its own */
+    start(&FACE_ANIMS[anim], anim, now_ms);
+}
+
+void face_anim_play_custom(const face_step_def_t *steps, int n, uint8_t playback, int64_t now_ms)
+{
+    if (steps == NULL || n < 1) {
+        return;
+    }
+    if (n > FACE_CUSTOM_MAX_STEPS) {
+        n = FACE_CUSTOM_MAX_STEPS;
+    }
+    /* finish what was due under the old program before its steps are overwritten */
+    process_timers(now_ms);
+    memmove(A.custom_steps, steps, (size_t)n * sizeof(steps[0]));
+    A.custom.step_count = (uint8_t)n;
+    A.custom.playback = playback <= FACE_PLAYBACK_PING_PONG ? playback : FACE_PLAYBACK_ONCE;
+    start(&A.custom, -1, now_ms);
 }
 
 int face_anim_current(void)
 {
     return A.anim;
+}
+
+bool face_anim_finished(void)
+{
+    return !A.playing;
+}
+
+void face_anim_override(int expr, int transition_ms, int64_t now_ms)
+{
+    process_timers(now_ms);
+    if (expr >= 0) {
+        /* Borrow the eyes (and colors, ambient motion), not the head: the head
+         * keeps heading where the program's current step points, so the
+         * action alone decides how the head moves on top of it. */
+        look_t target;
+        look_from_expr(&FACE_EXPRS[expr], &target);
+        const face_expr_def_t *keep = &FACE_EXPRS[A.def->steps[A.step].expr];
+        target.v[V_HEAD_X] = keep->head[0];
+        target.v[V_HEAD_Y] = keep->head[1];
+        target.v[V_HEAD_Z] = keep->head[2];
+        A.override = true;
+        animate_to_look(target, transition_ms, FACE_TRANSITION_SMOOTH, now_ms);
+    } else if (A.override) {
+        A.override = false;
+        animate_to(A.def->steps[A.step].expr, transition_ms, FACE_TRANSITION_SMOOTH, now_ms);
+    }
 }
 
 void face_anim_update(int64_t now, face_frame_t *out)
@@ -318,7 +422,7 @@ void face_anim_update(int64_t now, face_frame_t *out)
 
     if (A.tr) {
         const float linear = clamp01((float)(now - A.tr_start) / (float)A.tr_ms);
-        const float e = ease(linear, A.tr_kind);
+        const float e = face_ease(linear, A.tr_kind);
         A.strength = clamp01(e);
         for (int i = 0; i < V_COUNT; i++) {
             A.cur.v[i] = A.from.v[i] + (A.to.v[i] - A.from.v[i]) * e;

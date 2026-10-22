@@ -2,9 +2,14 @@
  * Internal types shared by the face component.
  *
  *   face_data.c (generated)  ->  tables of expressions / animations
+ *   face_action_data.c (gen) ->  table of actions (actions.json)
+ *   face_anim.c              ->  states / expressions / sequences -> pose per frame
+ *   face_action.c            ->  action keyframes -> head offset per frame
+ *   face_follow.c            ->  head + offset -> servo commands + what the screen draws
  *   face_geom.c              ->  pose -> head ellipse + eye polygons (screen px)
  *   face_raster.c            ->  shapes -> RGB565 pixels, anti-aliased
- *   face.c                   ->  LVGL canvas, public API
+ *   face_render.c            ->  frame -> only the changed pixels
+ *   face.c                   ->  LVGL canvas, request slot, public API
  *
  * Coordinates follow the avatar lab: x to the viewer's right, y down,
  * z toward the viewer. Head angles are in degrees and composed as in the
@@ -100,6 +105,30 @@ typedef struct {
     face_blink_def_t blink;
 } face_anim_def_t;
 
+/* ---------- tables generated from actions.json ---------- */
+
+/* Action offsets are gimbal angles relative to wherever the face is pointing,
+ * ROS REP-103 degrees: +yaw = turns to the device's own left, +pitch = nods
+ * down, +roll = top of the head toward the device's own right (screen only). */
+enum { FACE_YAW = 0, FACE_PITCH, FACE_ROLL };
+
+typedef struct {
+    uint16_t t_ms;              /* from the start of the action */
+    uint8_t ease;               /* face_transition_t of the segment that ends here */
+    float off[3];               /* yaw, pitch, roll */
+} face_key_def_t;
+
+typedef struct {
+    const char *name;
+    const char *description;
+    int16_t expr;               /* expression shown during the action, -1 = keep the face */
+    uint16_t expr_in_ms;        /* ease into it from the start */
+    uint16_t expr_until_ms;     /* give the face back at this time ... */
+    uint16_t expr_out_ms;       /* ... easing over this long */
+    uint8_t key_count;          /* first key t = 0, last key back at 0 offset */
+    const face_key_def_t *keys;
+} face_action_def_t;
+
 /* ---------- pose: everything the geometry layer needs for one frame ---------- */
 
 typedef struct {
@@ -176,14 +205,44 @@ typedef struct {
     float base_head[3];         /* head angles without ambient motion: what the servos follow */
     float rot[9];               /* head rotation drawn on screen (row-major) */
     uint32_t body_rgb, eyes_rgb;
+    float act[3];               /* action offset on top (REP-103 yaw, pitch, roll), set after face_anim_update */
 } face_frame_t;
+
+/* face_transition_t easing, p in [0, 1] (spring overshoots slightly). */
+float face_ease(float p, uint8_t kind);
+
+#define FACE_CUSTOM_MAX_STEPS 16
 
 /* Start state `anim` at now_ms, already showing its first expression.
  * rand01 returns [0, 1) for blink intervals; NULL uses a built-in generator. */
 void face_anim_init(int anim, int64_t now_ms, float (*rand01)(void));
 /* Switch state; the face eases over from where it is. */
 void face_anim_play(int anim, int64_t now_ms);
+/* Play a program built at run time (steps are copied; n is clamped to
+ * 1..FACE_CUSTOM_MAX_STEPS; playback is a face_playback_t). It blinks like
+ * the "idle" state. A single expression is a one-step FACE_PLAYBACK_ONCE. */
+void face_anim_play_custom(const face_step_def_t *steps, int n, uint8_t playback, int64_t now_ms);
+/* Index of the state playing, or -1 for a custom program. */
 int  face_anim_current(void);
+/* True once a 'once' program has completed its last step (it then holds
+ * that expression). Repeating programs never finish. */
+bool face_anim_finished(void);
+/* expr >= 0: show that expression instead of the program's (an action borrows
+ * the face); the program keeps its timing underneath. expr < 0: ease back to
+ * the program's current step. Starting a new program also ends the override. */
+void face_anim_override(int expr, int transition_ms, int64_t now_ms);
+
+/* ---------- actions (face_action.c) ---------- */
+
+void face_action_init(void);
+/* Start action `index` (FACE_ACTIONS), or ease back to rest if index < 0.
+ * The new curve starts from the current offset, so interrupting is smooth. */
+void face_action_play(int index, int64_t now_ms);
+/* Index of the action in progress, -1 if none (also while easing back). */
+int  face_action_current(void);
+/* Advance to now_ms (before face_anim_update: it may borrow or give back the
+ * expression) and write the offset for this frame. */
+void face_action_update(int64_t now_ms, float out[3]);
 /* Advance to now_ms (non-decreasing) and produce that frame.
  * out->rot is the full head rotation; servo following replaces it. */
 void face_anim_update(int64_t now_ms, face_frame_t *out);
@@ -198,9 +257,12 @@ bool face_follow_enabled(void);
 /* Gimbal angles (ROS REP-103, degrees: +yaw = device turns to its own left,
  * +pitch = nods down) that point the face along rotation m. */
 void face_follow_gimbal_angles(const float m[9], float *yaw, float *pitch);
-/* Command the servos for this frame and set fr->rot to the part of the head
- * rotation the gimbal has not taken over (what the screen should draw). */
+/* Add the action offset fr->act to the head, command the servos for this
+ * frame and set fr->rot to the part of the head rotation the gimbal has not
+ * taken over (what the screen should draw). */
 void face_follow_apply(face_frame_t *fr, int64_t now_ms);
+/* Gimbal rotation in lab coordinates, R = Ry(yaw) * Rx(-pitch). */
+void face_follow_gimbal_rotation(float yaw, float pitch, float m[9]);
 
 /* ---------- frame renderer (face_render.c) ---------- */
 
