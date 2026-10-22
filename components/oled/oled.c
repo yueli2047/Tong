@@ -12,9 +12,19 @@
 #define OLED_H_RES          128
 #define OLED_V_RES          64
 
+/* Text taller than the screen scrolls up one line at a time: it rests at the
+ * top, steps a line every SCROLL_STEP_MS, rests on the last lines, then starts
+ * over. Each step is one frame on the I2C bus (~25 ms), so the LVGL task,
+ * which also draws the face, hardly notices; a smooth pixel scroll would
+ * cost that on every frame. */
+#define SCROLL_REST_MS      3000
+#define SCROLL_STEP_MS      1500
+
 static const char *TAG = "oled";
 static lv_display_t *s_disp = NULL;
 static lv_obj_t *s_label = NULL;
+static lv_timer_t *s_scroll = NULL;     /* only while the text does not fit */
+static int32_t s_line_h, s_lines_hidden, s_pos;
 
 #define CHECK(x) do {                                               \
         esp_err_t err_ = (x);                                       \
@@ -93,8 +103,12 @@ esp_err_t oled_init(int sda_gpio, int scl_gpio)
     CHECK(esp_lcd_panel_mirror(panel, true, true));
 
     // Use this display's own screen, not lv_screen_active() (that belongs to the ST7789).
+    // The screen itself never scrolls (long text moves the label instead), so no scrollbar.
     lvgl_port_lock(0);
-    s_label = lv_label_create(lv_display_get_screen_active(s_disp));
+    lv_obj_t *screen = lv_display_get_screen_active(s_disp);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    s_label = lv_label_create(screen);
     lv_label_set_long_mode(s_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_label, OLED_H_RES);
     lv_obj_align(s_label, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -110,6 +124,19 @@ void oled_clear(void)
     oled_show_text("");
 }
 
+/* Runs in the LVGL task. */
+static void scroll_step(lv_timer_t *timer)
+{
+    if (s_pos < s_lines_hidden) {
+        s_pos++;
+        lv_timer_set_period(timer, s_pos == s_lines_hidden ? SCROLL_REST_MS : SCROLL_STEP_MS);
+    } else {
+        s_pos = 0;
+        lv_timer_set_period(timer, SCROLL_REST_MS);
+    }
+    lv_obj_set_y(s_label, -s_pos * s_line_h);
+}
+
 void oled_show_text(const char *text)
 {
     if (s_label == NULL) {
@@ -117,5 +144,22 @@ void oled_show_text(const char *text)
     }
     lvgl_port_lock(0);
     lv_label_set_text(s_label, text);
+    lv_obj_set_y(s_label, 0);
+
+    // How many wrapped lines fall below the screen?
+    lv_obj_update_layout(s_label);
+    const int32_t h = lv_obj_get_height(s_label);
+    s_line_h = lv_font_get_line_height(lv_obj_get_style_text_font(s_label, LV_PART_MAIN))
+               + lv_obj_get_style_text_line_space(s_label, LV_PART_MAIN);
+    s_lines_hidden = (h > OLED_V_RES && s_line_h > 0) ? (h - OLED_V_RES + s_line_h - 1) / s_line_h : 0;
+    s_pos = 0;
+
+    if (s_scroll != NULL) {
+        lv_timer_delete(s_scroll);
+        s_scroll = NULL;
+    }
+    if (s_lines_hidden > 0) {
+        s_scroll = lv_timer_create(scroll_step, SCROLL_REST_MS, NULL);
+    }
     lvgl_port_unlock();
 }
