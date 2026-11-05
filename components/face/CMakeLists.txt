@@ -8,12 +8,12 @@ idf_component_register(SRCS "face.c" "face_anim.c" "face_action.c" "face_follow.
 # uses the default debug level (-Og). Only this component is affected.
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
 
-# Tables are generated at build time: edit anchor.avatar.json (expressions,
+# Tables are generated at build time: edit tong.avatar.json (expressions,
 # states) or actions.json (head motions), run `idf.py build`, done. The output
 # lives in the build directory and is not committed.
 idf_build_get_property(python PYTHON)
 
-set(avatar_json  "${COMPONENT_DIR}/anchor.avatar.json")
+set(avatar_json  "${COMPONENT_DIR}/tong.avatar.json")
 set(actions_json "${COMPONENT_DIR}/actions.json")
 set(avatar2c     "${COMPONENT_DIR}/scripts/avatar2c.py")
 set(actions2c    "${COMPONENT_DIR}/scripts/actions2c.py")
@@ -36,7 +36,7 @@ add_custom_command(
     OUTPUT ${gen_c} ${gen_h}
     COMMAND ${python} ${avatar2c} ${avatar_json} ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS ${avatar_json} ${avatar2c}
-    COMMENT "Generating face tables from anchor.avatar.json"
+    COMMENT "Generating face tables from tong.avatar.json"
     VERBATIM)
 
 # actions may borrow expressions, so they are checked against the avatar too

@@ -3,4 +3,5 @@ sdkconfig.old
 managed_components/
 servo_log.txt
 display_info.txt
-face*.gif
+.vscode/
+sdkconfig

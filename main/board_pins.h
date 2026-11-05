@@ -1,6 +1,6 @@
 #pragma once
 
-// Pin map - single source of truth, keep in sync with the agreed pin table
+// Pin map: the single source of truth for every GPIO the firmware uses.
 
 #define PIN_STATUS_LED   48   // onboard RGB (WS2812)
 
@@ -19,6 +19,3 @@
 
 #define PIN_BTN_YES       6
 #define PIN_BTN_NO        7
-
-#define PIN_TOUCH        17   // reserved
-#define PIN_BAT_ADC       1   // reserved

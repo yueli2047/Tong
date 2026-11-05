@@ -15,72 +15,54 @@
 #include "servo.h"
 
 static const char *TAG = "tong";
-#define SERVO_STREAM_TEST 0      // set to 0 after the test
-void servo_stream_test(void);
 
-/* ---------- face test playlist: actions, states, expressions, sequences ----------
- * Actions play on top of whatever face was selected last, so the first YES
- * presses after boot play them over "idle". */
+/* ---------- demo playlist: actions, expressions, states ----------
+ * Offline, Tong plays every item in this order by itself, then starts over.
+ * A button press steps by hand instead (YES next, NO previous); after
+ * AUTO_RESUME_MS without a press the automatic run carries on from there.
+ * Custom sequences are not part of it: those are made online, by the model. */
 
-typedef struct {
-    const char *label;
-    const face_step_t *steps;
-    int n;
-    face_loop_t loop;
-} demo_seq_t;
-
-static const face_step_t SEQ_SURPRISE[] = {
-    { "surprised-wide-left", 150, 800, FACE_EASE_SNAPPY },
-    { "joyful-wide",         500, 0,   FACE_EASE_SMOOTH },
-};
-static const face_step_t SEQ_LOOK_AROUND[] = {
-    { "far-right-glance",   400, 700, FACE_EASE_SMOOTH },
-    { "attentive-left",     400, 700, FACE_EASE_SMOOTH },
-    { "upward-side-glance", 400, 900, FACE_EASE_SPRING },
-};
-static const face_step_t SEQ_NOD_OFF[] = {
-    { "sleepy-squint", 600, 900,  FACE_EASE_SMOOTH },
-    { "drowsy-closed", 600, 900,  FACE_EASE_SMOOTH },
-    { "eyes-closed",   600, 1500, FACE_EASE_SMOOTH },
-};
-static const demo_seq_t DEMOS[] = {
-    { "surprise>happy", SEQ_SURPRISE,    2, FACE_LOOP_ONCE },       /* stays on happy */
-    { "look around",    SEQ_LOOK_AROUND, 3, FACE_LOOP_REPEAT },
-    { "nod off",        SEQ_NOD_OFF,     3, FACE_LOOP_PING_PONG },
-};
-#define DEMO_COUNT ((int)(sizeof(DEMOS) / sizeof(DEMOS[0])))
+#define AUTO_BOOT_MS        2000    /* resting face after boot before the run starts */
+#define AUTO_RESUME_MS      30000   /* no press for this long: the automatic run resumes */
+#define AUTO_GAP_MS         800     /* after an action, before the next item */
+#define AUTO_EXPRESSION_MS  2200    /* per expression, transition included */
+#define AUTO_STATE_MS       4500    /* per state */
 
 static int item_count(void)
 {
-    return face_action_count() + face_state_count() + face_expression_count() + DEMO_COUNT;
+    return face_action_count() + face_expression_count() + face_state_count();
+}
+
+/* How long the automatic run stays on item i. */
+static int item_ms(int i)
+{
+    const int na = face_action_count(), ne = face_expression_count();
+    if (i < na) {
+        const int d = face_action_duration_ms(i);
+        return (d > 0 ? d : 1500) + AUTO_GAP_MS;
+    }
+    return (i < na + ne) ? AUTO_EXPRESSION_MS : AUTO_STATE_MS;
 }
 
 static void play_item(int i)
 {
-    const int na = face_action_count(), ns = face_state_count(), ne = face_expression_count();
+    const int na = face_action_count(), ne = face_expression_count(), ns = face_state_count();
     char text[48];
     esp_err_t err;
     if (i < na) {
+        if (i == 0) {       /* the actions are shown on the resting face */
+            face_show_expression(FACE_REST_EXPRESSION, FACE_TRANSITION_DEFAULT_MS);
+        }
         err = face_do_action(face_action_name(i));
         snprintf(text, sizeof(text), "action %d/%d\n%s", i + 1, na, face_action_name(i));
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "action %d: %s", i, esp_err_to_name(err));
-        }
-        oled_show_text(text);
-        return;
-    }
-    i -= na;
-    if (i < ns) {
-        err = face_play_state(face_state_name(i));
-        snprintf(text, sizeof(text), "state %d/%d\n%s", i + 1, ns, face_state_name(i));
-    } else if (i < ns + ne) {
-        const int k = i - ns;
+    } else if (i < na + ne) {
+        const int k = i - na;
         err = face_show_expression(face_expression_name(k), FACE_TRANSITION_DEFAULT_MS);
-        snprintf(text, sizeof(text), "expr %d/%d\n%s", k + 1, ne, face_expression_name(k));
+        snprintf(text, sizeof(text), "expression %d/%d\n%s", k + 1, ne, face_expression_name(k));
     } else {
-        const demo_seq_t *d = &DEMOS[i - ns - ne];
-        err = face_play_sequence(d->steps, d->n, d->loop);
-        snprintf(text, sizeof(text), "seq %d/%d\n%s", i - ns - ne + 1, DEMO_COUNT, d->label);
+        const int k = i - na - ne;
+        err = face_play_state(face_state_name(k));
+        snprintf(text, sizeof(text), "state %d/%d\n%s", k + 1, ns, face_state_name(k));
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "item %d: %s", i, esp_err_to_name(err));
@@ -132,8 +114,12 @@ static void face_watch_task(void *arg)
         if (online != was_online) {
             was_online = online;
             ESP_LOGI(TAG, "%s", online ? "online: YES = pat, NO = neck on/off"
-                                       : "offline: YES = next, NO = previous");
-            oled_show_text(online ? "online" : "offline\nYES/NO: browse");
+                                       : "offline: demo playlist (YES next, NO previous)");
+            oled_show_text(online ? "online" : "offline");
+            if (online) {   /* the model starts from the resting face, not a playlist item */
+                face_stop_action();
+                face_show_expression(FACE_REST_EXPRESSION, FACE_TRANSITION_DEFAULT_MS);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -195,30 +181,38 @@ void app_main(void)
     face_self_check();
     xTaskCreate(face_watch_task, "face_watch", 3072, NULL, 2, NULL);
 
-    // Offline (no host): YES/NO browse the test playlist; the first YES goes to
-    // the first action. Online (the bridge is attached): YES pats Tong on the
-    // head, NO turns the neck on or off.
+    // Offline (no host): the demo playlist runs by itself; YES/NO step through
+    // it by hand. Online (the bridge is attached): the model owns the face,
+    // YES pats Tong on the head, NO turns the neck on or off.
     const int n = item_count();
     int i = -1;
-    oled_show_text("offline\nYES/NO: browse");
-    ESP_LOGI(TAG, "boot complete: %d items (%d actions, %d states, %d expressions, %d sequences)",
-             n, face_action_count(), face_state_count(), face_expression_count(), DEMO_COUNT);
+    TickType_t wait = pdMS_TO_TICKS(AUTO_BOOT_MS);
+    oled_show_text("Tong");
+    ESP_LOGI(TAG, "boot complete: %d items (%d actions, %d expressions, %d states)",
+             n, face_action_count(), face_expression_count(), face_state_count());
 
     while (1) {
-        const button_t b = buttons_wait(portMAX_DELAY);
+        const button_t b = buttons_wait(wait);
         if (mcp_host_online()) {
             if (b == BUTTON_YES) {
                 ESP_LOGI(TAG, "pat");
                 mcp_pat();
-            } else {
+            } else if (b == BUTTON_NO) {
                 const bool on = !face_get_servo_follow();
                 face_set_servo_follow(on);
                 oled_show_text(on ? "neck on" : "neck off");
             }
+            wait = pdMS_TO_TICKS(AUTO_RESUME_MS);
             continue;
         }
-        i = (b == BUTTON_YES) ? (i + 1) % n : (i <= 0 ? n - 1 : i - 1);
-        mcp_cancel_auto_return();       // a face picked by hand stays
+        if (b != BUTTON_NONE) {         // by hand
+            i = (b == BUTTON_YES) ? (i + 1) % n : (i <= 0 ? n - 1 : i - 1);
+            wait = pdMS_TO_TICKS(AUTO_RESUME_MS);
+        } else {                        // the automatic run
+            i = (i + 1) % n;
+            wait = pdMS_TO_TICKS(item_ms(i));
+        }
+        mcp_cancel_auto_return();       // a playlist face stays until the next item
         play_item(i);
     }
 }

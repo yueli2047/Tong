@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /*
- * Animated face on the ST7789, drawn from anchor.avatar.json.
+ * Animated face on the ST7789, drawn from tong.avatar.json.
  *
  * Three ways to say what the face does. They share one channel: each call
  * replaces whatever was playing, and the face eases over from where it is.

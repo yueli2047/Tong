@@ -40,7 +40,7 @@ extern "C" {
 #define FACE_ORIGIN_X   160.0f
 #define FACE_ORIGIN_Y   120.0f
 
-/* ---------- tables generated from anchor.avatar.json ---------- */
+/* ---------- tables generated from tong.avatar.json ---------- */
 
 typedef enum {
     FACE_MOTION_NONE = 0,
